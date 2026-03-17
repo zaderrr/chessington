@@ -24,6 +24,6 @@ for game in dataset:
     if count % GAMES_PER_FILE == 0:
         f.close()
         file_idx += 1
-        f = open(f"lichess_{year}_{month}_{file_idx:03d}.pgn", "w")
+        f = open(f"data/pgn/lichess_{year}_{month}_{file_idx:03d}.pgn", "w")
 
 f.close()
