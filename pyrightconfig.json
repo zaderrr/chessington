@@ -1,0 +1,10 @@
+{
+  "venvPath": ".",
+  "venv": "venv",
+  "extraPaths": [
+    "/home/e/Documents/Projects/scidPython"
+  ],
+  "pythonVersion": "3.8",
+  "typeCheckingMode": "basic",
+  "useLibraryCodeForTypes": true
+}
