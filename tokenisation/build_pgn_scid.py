@@ -5,24 +5,24 @@ from pyscid import Database
 from dotenv import load_dotenv
 load_dotenv()
 
-# Path to your test database
+MAX_GAMES = 15_000_000_000
 
+# Path to your database
 db_path = os.environ.get("SCID_DATABASE_PATH")
 start = time.time()
 db = Database.open(db_path)
 count = 0
+file_idx = 0
 total = db.num_games
+f = open(f"data/pgn/unsortedGIGABASE_{file_idx:03d}.pgn", "w");
 for game in db.search():
-    white = game.white.replace(",", "").replace(" ", "_")
-    black = game.black.replace(",", "").replace(" ", "_")
-    date = game.date_string.replace(".", "")  # YYYYMMDD
-    result = str(game.result).replace("/", "-").replace("-", "")  # 1-0 -> 10
-    
-    name = f"{white}_vs_{black}_{date}_{result}.pgn"
-    with open(f"data/pgn/unsorted/{name}",'w') as pgn:
-        pgn.write(game.to_pgn())
+        f.write(game.to_pgn())
         count += 1
         print(f"{count} / {total}")
+        if count % MAX_GAMES == 0:
+            f.close()
+            file_idx += 1
+            f = open(f"data/pgn/unsortedGIGABASE_{file_idx:03d}.pgn", "w");
 elapsed = time.perf_counter() - start
 print(f"Completed in {elapsed:.2}s")
 db.close()
