@@ -5,7 +5,7 @@ Chess PGN Tokenizer
 Tokenizes PGN game files into integer sequences for language model training.
 
 Vocabulary design:
-  - Special tokens: <pad>, <bos>, <eos>, <unk>, <white_win>, <black_win>, <draw>
+  - Special tokens:  <bos>, <eos>, <unk>, <white_win>, <black_win>, <draw>
   - Move tokens: all unique SAN move strings found in the data
   - Move number tokens: "1.", "2.", ... up to max seen
 
@@ -64,18 +64,18 @@ def resolve_pgn_inputs(input_path: str) -> list[str]:
 # ── Special tokens ──────────────────────────────────────────────────────────
 
 SPECIAL_TOKENS = [
-    "<pad>",      # 0 - padding
-    "<bos>",      # 1 - beginning of game
-    "<eos>",      # 2 - end of game
-    "<unk>",      # 3 - unknown token
-    "1-0",        # 4 - white wins
-    "0-1",        # 5 - black wins
-    "1/2-1/2",    # 6 - draw
-    "*",          # 7 - unknown/ongoing result
+    "<bos>",  # 0 - beginning of game
+    "<eos>",  # 1 - end of game
+    "<unk>",  # 2 - unknown token
+    "<white_win>",  # 3 - white wins
+    "<black_win>",  # 4 - black wins
+    "<draw>",  # 5 - draw
+    "*",  # 6 - unknown/ongoing result
 ]
 
 
 # ── PGN Parsing ─────────────────────────────────────────────────────────────
+
 
 def iter_pgn_games(filepath: str):
     """
@@ -149,10 +149,10 @@ def tokenize_movetext(text: str) -> list[str]:
     #   optional capture 'x', destination square, optional promotion, optional +/#
     # Also handles O-O, O-O-O castling
     pattern = re.compile(
-        r"(\d+\.{1,3})"              # move number: "1." or "1..." 
+        r"(\d+\.{1,3})"  # move number: "1." or "1..."
         r"|([KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[+#]?)"  # standard SAN
-        r"|(O-O-O[+#]?|O-O[+#]?)"   # castling
-        r"|(1-0|0-1|1/2-1/2|\*)"     # result
+        r"|(O-O-O[+#]?|O-O[+#]?)"  # castling
+        r"|(1-0|0-1|1/2-1/2|\*)"  # result
     )
 
     for m in pattern.finditer(text):
@@ -167,6 +167,7 @@ def tokenize_movetext(text: str) -> list[str]:
 
 # ── Vocabulary ──────────────────────────────────────────────────────────────
 
+
 class ChessVocab:
     """Token <-> ID mapping for chess PGN tokens."""
 
@@ -175,7 +176,9 @@ class ChessVocab:
         self.id_to_token: dict[int, str] = {}
 
     @classmethod
-    def build(cls, pgn_paths: list[str], max_games: int = 0, min_freq: int = 1) -> "ChessVocab":
+    def build(
+        cls, pgn_paths: list[str], max_games: int = 0, min_freq: int = 1
+    ) -> "ChessVocab":
         """Build vocabulary by scanning PGN files."""
         vocab = cls()
         counts: Counter = Counter()
@@ -188,7 +191,9 @@ class ChessVocab:
                 counts.update(tokens)
                 n_games += 1
                 if n_games % 100_000 == 0:
-                    print(f"  ...scanned {n_games:,} games, {len(counts):,} unique tokens")
+                    print(
+                        f"  ...scanned {n_games:,} games, {len(counts):,} unique tokens"
+                    )
                 if max_games and n_games >= max_games:
                     break
             if max_games and n_games >= max_games:
@@ -204,8 +209,7 @@ class ChessVocab:
 
         # Add move number tokens in order (1. through max seen)
         move_nums = sorted(
-            [t for t in counts if re.match(r"^\d+\.$", t)],
-            key=lambda x: int(x[:-1])
+            [t for t in counts if re.match(r"^\d+\.$", t)], key=lambda x: int(x[:-1])
         )
         for mn in move_nums:
             if mn not in vocab.token_to_id:
@@ -262,6 +266,7 @@ class ChessVocab:
 
 
 # ── Tokenization to binary ─────────────────────────────────────────────────
+
 
 def tokenize_to_bin(
     pgn_paths: list[str],
@@ -340,10 +345,13 @@ def tokenize_to_bin(
     file_size_mb = Path(output_path).stat().st_size / (1024 * 1024)
     print(f"Done! {n_games:,} games, {total_tokens:,} tokens, {file_size_mb:.1f} MB")
     if n_unk > 0:
-        print(f"  WARNING: {n_unk:,} unknown tokens encountered ({n_unk/total_tokens*100:.2f}%)")
+        print(
+            f"  WARNING: {n_unk:,} unknown tokens encountered ({n_unk / total_tokens * 100:.2f}%)"
+        )
 
 
 # ── Inspect ─────────────────────────────────────────────────────────────────
+
 
 def inspect_bin(vocab: ChessVocab, bin_path: str, n_games: int = 5):
     """Print the first N games from a tokenized .bin file."""
@@ -385,27 +393,38 @@ def inspect_bin(vocab: ChessVocab, bin_path: str, n_games: int = 5):
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Chess PGN Tokenizer for LM training",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
+        epilog=__doc__,
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # build-vocab
     p_vocab = sub.add_parser("build-vocab", help="Build vocabulary from PGN file(s)")
-    p_vocab.add_argument("--input", "-i", required=True, help="PGN file, directory, or glob pattern")
+    p_vocab.add_argument(
+        "--input", "-i", required=True, help="PGN file, directory, or glob pattern"
+    )
     p_vocab.add_argument("--output", "-o", required=True, help="Output vocab JSON file")
-    p_vocab.add_argument("--max-games", type=int, default=0, help="Max games to scan (0=all)")
-    p_vocab.add_argument("--min-freq", type=int, default=1, help="Min token frequency to include")
+    p_vocab.add_argument(
+        "--max-games", type=int, default=0, help="Max games to scan (0=all)"
+    )
+    p_vocab.add_argument(
+        "--min-freq", type=int, default=1, help="Min token frequency to include"
+    )
 
     # tokenize
     p_tok = sub.add_parser("tokenize", help="Tokenize PGN file(s) to .bin")
-    p_tok.add_argument("--input", "-i", required=True, help="PGN file, directory, or glob pattern")
+    p_tok.add_argument(
+        "--input", "-i", required=True, help="PGN file, directory, or glob pattern"
+    )
     p_tok.add_argument("--vocab", "-v", required=True, help="Vocabulary JSON file")
     p_tok.add_argument("--output", "-o", required=True, help="Output .bin file")
-    p_tok.add_argument("--max-games", type=int, default=0, help="Max games to tokenize (0=all)")
+    p_tok.add_argument(
+        "--max-games", type=int, default=0, help="Max games to tokenize (0=all)"
+    )
     p_tok.add_argument("--dtype", choices=["uint16", "uint32"], default="uint16")
 
     # inspect
@@ -418,13 +437,17 @@ def main():
 
     if args.command == "build-vocab":
         pgn_files = resolve_pgn_inputs(args.input)
-        vocab = ChessVocab.build(pgn_files, max_games=args.max_games, min_freq=args.min_freq)
+        vocab = ChessVocab.build(
+            pgn_files, max_games=args.max_games, min_freq=args.min_freq
+        )
         vocab.save(args.output)
 
     elif args.command == "tokenize":
         pgn_files = resolve_pgn_inputs(args.input)
         vocab = ChessVocab.load(args.vocab)
-        tokenize_to_bin(pgn_files, vocab, args.output, max_games=args.max_games, dtype=args.dtype)
+        tokenize_to_bin(
+            pgn_files, vocab, args.output, max_games=args.max_games, dtype=args.dtype
+        )
 
     elif args.command == "inspect":
         vocab = ChessVocab.load(args.vocab)

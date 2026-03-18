@@ -25,20 +25,23 @@ count = 0
 f = open(f"{output_dir}/{file_idx:03d}.pgn", "w")
 for game in dataset:
     #Filter minimum elo
-    black_elo = game["WhiteElo"]
-    white_elo = game["BlackElo"]
+    white_elo = game["WhiteElo"]
+    black_elo = game["BlackElo"]
     if white_elo is None or black_elo is None:
         continue
     if black_elo < min_elo or white_elo < min_elo:
-       continue 
+        continue 
     f.write(game["movetext"] + "\n\n")
     count += 1
     #Log progressevery 1000 games
+    if (count > MAX_GAMES):
+        break 
     if (count % 1000 == 0):
         print(f"Games: {count} / {MAX_GAMES}")
     if count % GAMES_PER_FILE == 0:
         f.close()
         file_idx += 1
         f = open(f"{output_dir}/{file_idx:03d}.pgn", "w")
+
 
 f.close()
