@@ -1,21 +1,20 @@
 import { Chessboard, type ChessboardOptions, type PieceDropHandlerArgs } from "react-chessboard";
 import ErrorBoundary from "./ErrorBoundary";
 import { Chess } from "chess.js";
-import { useState } from "react";
 import { defaultGameFen } from "../../App";
 const Board = ({
     currentGame,
-    setBoardPos,
+    pieceMoved,
     boardPos,
 }: {
     currentGame: Chess | null;
-    setBoardPos: (string: string) => void;
+    pieceMoved: (string: string) => void;
     boardPos: string
 }) => {
     const pieceDropped = (args: PieceDropHandlerArgs): boolean => {
         if (!currentGame || !args.targetSquare) return false;
         currentGame.move({ from: args.sourceSquare, to: args.targetSquare });
-        setBoardPos(currentGame.fen());
+        pieceMoved(currentGame.fen());
         return true;
     };
 

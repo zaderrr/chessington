@@ -3,7 +3,8 @@ venv/
 .vscode/
 .env
 .ruff_cache/
-
+api/server.config.json
+api/__pycache__
 # Web
 web/node_modules/
 web/dist/
