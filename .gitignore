@@ -2,3 +2,9 @@ data/
 venv/
 .vscode/
 .env
+.ruff_cache/
+
+# Web
+web/node_modules/
+web/dist/
+web/.eslintrc.js.bak
