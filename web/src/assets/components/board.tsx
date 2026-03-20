@@ -6,14 +6,17 @@ const Board = ({
     currentGame,
     pieceMoved,
     boardPos,
+    canUserMove,
 }: {
     currentGame: Chess | null;
     pieceMoved: (string: string) => void;
-    boardPos: string
+    boardPos: string;
+    canUserMove: boolean;
 }) => {
     const pieceDropped = (args: PieceDropHandlerArgs): boolean => {
         if (!currentGame || !args.targetSquare) return false;
-        currentGame.move({ from: args.sourceSquare, to: args.targetSquare });
+        const moved = currentGame.move({ from: args.sourceSquare, to: args.targetSquare });
+        if (!moved) return false;
         pieceMoved(currentGame.fen());
         return true;
     };
@@ -27,6 +30,7 @@ const Board = ({
         boardStyle: { width: "50%" },
         position: currentPosition(),
         onPieceDrop: pieceDropped,
+        allowDragging: canUserMove,
     };
 
     return (

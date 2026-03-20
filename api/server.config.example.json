@@ -1,7 +1,20 @@
 {
     "training_dir": "",
     "checkpoint_path": "",
-    "device": "cude",
+    "models_dir": "models",
+    "models": [
+        {
+            "name": "ChessingtonV0.5",
+            "checkpoint_path": "models/ChessingtonV0.5/best.pt"
+        },
+        {
+            "name": "ChessingtonV0.5_sft",
+            "checkpoint_path": "models/ChessingtonV0.5_sft/best.pt"
+        }
+    ],
+    "device": "cuda",
+    "sft_white_win_token": "<white_win>",
+    "sft_black_win_token": "<black_win>",
     "max_new_tokens": 128,
     "temperature": 0.8,
     "top_k": 50,
