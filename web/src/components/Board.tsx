@@ -1,7 +1,8 @@
 import { Chessboard, type ChessboardOptions, type PieceDropHandlerArgs } from "react-chessboard";
 import ErrorBoundary from "./ErrorBoundary";
-import { Chess } from "chess.js";
-import { defaultGameFen } from "../../App";
+import type { Chess } from "chess.js";
+import { DEFAULT_FEN } from "../types";
+
 const Board = ({
     currentGame,
     pieceMoved,
@@ -9,7 +10,7 @@ const Board = ({
     canUserMove,
 }: {
     currentGame: Chess | null;
-    pieceMoved: (string: string) => void;
+    pieceMoved: (fen: string) => void;
     boardPos: string;
     canUserMove: boolean;
 }) => {
@@ -21,25 +22,15 @@ const Board = ({
         return true;
     };
 
-    const currentPosition = (): string => {
-        if (currentGame) return boardPos;
-        return defaultGameFen;
-    };
-
     const boardSetup: ChessboardOptions = {
-        boardStyle: { width: "50%" },
-        position: currentPosition(),
+        position: currentGame ? boardPos : DEFAULT_FEN,
         onPieceDrop: pieceDropped,
         allowDragging: canUserMove,
     };
 
     return (
         <ErrorBoundary>
-            <div className="flex flex-col justify-center w-full ">
-                <div className="flex flex-row justify-center">
-                    <Chessboard options={boardSetup} />
-                </div>
-            </div>
+            <Chessboard options={boardSetup} />
         </ErrorBoundary>
     );
 };

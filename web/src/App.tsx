@@ -1,476 +1,320 @@
-import "./App.css";
-import MoveBoard from "./assets/components/moveBoard";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Chess } from "chess.js";
-import Board from "./assets/components/board";
+import Board from "./components/Board";
+import MovePanel from "./components/MovePanel";
+import { useChessServer } from "./hooks/useChessServer";
+import { DEFAULT_FEN, type GameMode, type SessionMatch, type StockfishConfig, type ServerMessage } from "./types";
 
-export const defaultGameFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+const MAX_RETRIES = 5;
 
-type GameMode = "human-vs-chessington" | "chessington-vs-stockfish";
-
-type ServerMessage = {
-    type:
-        | "chessington_move"
-        | "stockfish_bestmove"
-        | "game_saved"
-        | "model_list"
-        | "model_selected"
-        | "error";
-    move?: string;
-    message?: string;
-    path?: string;
-    models?: Array<{ name: string; checkpoint_path: string; is_sft?: boolean }>;
-    current_model?: string;
-    current_checkpoint?: string;
-    current_is_sft?: boolean;
-};
-
-type StockfishConfig = {
-    movetime: number;
-    nodes: number;
-    depth: number;
-};
-
-type SessionMatch = {
-    index: number;
-    chessingtonColor: "White" | "Black";
-    result: "W" | "L" | "D";
-    pgnResult: string;
-};
-
-type ModelOption = { name: string; checkpoint_path: string; is_sft?: boolean };
-
-const maxChessingtonRetries = 5;
-
-const getPlayersForMode = (
-    mode: GameMode,
-    chessingtonColor: "w" | "b",
-): { white: string; black: string } => {
-    if (mode === "human-vs-chessington") {
-        return { white: "You", black: "Chessington" };
-    }
-
-    if (chessingtonColor === "w") {
-        return { white: "Chessington", black: "Stockfish" };
-    }
-
-    return { white: "Stockfish", black: "Chessington" };
+const getPlayers = (mode: GameMode, chessingtonColor: "w" | "b") => {
+    if (mode === "human-vs-chessington") return { white: "You", black: "Chessington" };
+    return chessingtonColor === "w"
+        ? { white: "Chessington", black: "Stockfish" }
+        : { white: "Stockfish", black: "Chessington" };
 };
 
 const getGameResult = (game: Chess): string => {
-    if (game.isCheckmate()) {
-        return game.turn() === "w" ? "0-1" : "1-0";
-    }
-    if (game.isDraw()) {
-        return "1/2-1/2";
-    }
-
+    if (game.isCheckmate()) return game.turn() === "w" ? "0-1" : "1-0";
+    if (game.isDraw()) return "1/2-1/2";
     return "*";
 };
 
-const getChessingtonResult = (pgnResult: string, chessingtonColor: "w" | "b"): "W" | "L" | "D" => {
-    if (pgnResult === "1/2-1/2") return "D";
-    if (pgnResult === "1-0") return chessingtonColor === "w" ? "W" : "L";
-    if (pgnResult === "0-1") return chessingtonColor === "b" ? "W" : "L";
+const getChessingtonResult = (pgn: string, color: "w" | "b"): "W" | "L" | "D" => {
+    if (pgn === "1/2-1/2") return "D";
+    if (pgn === "1-0") return color === "w" ? "W" : "L";
+    if (pgn === "0-1") return color === "b" ? "W" : "L";
     return "D";
 };
 
 function App() {
     const [game, setGame] = useState<Chess | null>(null);
-    const [boardPos, setBoardPos] = useState<string>(defaultGameFen);
+    const [boardPos, setBoardPos] = useState(DEFAULT_FEN);
     const [moveHistory, setMoveHistory] = useState<string[]>([]);
-    const [status, setStatus] = useState<string>("Disconnected");
     const [gameMode, setGameMode] = useState<GameMode>("human-vs-chessington");
-    const [awaitingEngineMove, setAwaitingEngineMove] = useState(false);
-    const [engineChessingtonColor, setEngineChessingtonColor] = useState<"w" | "b">("w");
-    const [autoPlayEngineMatches, setAutoPlayEngineMatches] = useState(true);
+    const [awaitingEngine, setAwaitingEngine] = useState(false);
+    const [chessingtonColor, setChessingtonColor] = useState<"w" | "b">("w");
+    const [autoPlay, setAutoPlay] = useState(true);
     const [sessionMatches, setSessionMatches] = useState<SessionMatch[]>([]);
     const [stockfishConfig, setStockfishConfig] = useState<StockfishConfig>({
         movetime: 350,
         nodes: 0,
         depth: 0,
     });
-    const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
-    const [selectedModel, setSelectedModel] = useState<string>("");
 
     const gameRef = useRef<Chess | null>(null);
-    const socketRef = useRef<WebSocket | null>(null);
-    const chessingtonRetryCountRef = useRef(0);
+    const retryCountRef = useRef(0);
     const autoPlayTimerRef = useRef<number | null>(null);
-    const lastSavedPgnRef = useRef<string>("");
-    const lastRecordedResultPgnRef = useRef<string>("");
+    const lastSavedPgnRef = useRef("");
+    const lastRecordedRef = useRef("");
 
-    const startChessGame = (mode: GameMode, forcedChessingtonColor?: "w" | "b") => {
-        if (autoPlayTimerRef.current) {
-            window.clearTimeout(autoPlayTimerRef.current);
-            autoPlayTimerRef.current = null;
-        }
-
-        const selectedChessingtonColor =
-            mode === "chessington-vs-stockfish"
-                ? (forcedChessingtonColor ?? engineChessingtonColor)
-                : "b";
-
-        if (mode === "chessington-vs-stockfish") {
-            setEngineChessingtonColor(selectedChessingtonColor);
-        }
-
-        const newGame = new Chess(defaultGameFen);
-        const players = getPlayersForMode(mode, selectedChessingtonColor);
-        newGame.header(
-            "Event",
-            "Chessington Arena",
-            "Site",
-            "Local",
-            "White",
-            players.white,
-            "Black",
-            players.black,
-            "Date",
-            new Date().toISOString().slice(0, 10).replaceAll("-", "."),
-        );
-        setGame(newGame);
-        setMoveHistory([]);
-        lastSavedPgnRef.current = "";
-        lastRecordedResultPgnRef.current = "";
-        setGameMode(mode);
-        setAwaitingEngineMove(false);
-        chessingtonRetryCountRef.current = 0;
-        setStatus(mode === "human-vs-chessington" ? "New game: You play White" : "New game: Chessington vs Stockfish");
-        setBoardPos(newGame.fen());
-        gameRef.current = newGame;
-    };
-
-    const getFirstMoveFromPgn = (raw: string): string | null => {
-        const withoutHeaders = raw.replace(/^\s*(?:\[[^\]]*\]\s*)*/, "").trim();
-        const withoutLeadingMoveNumber = withoutHeaders.replace(/^\d+\.(?:\.\.)?\s*/, "");
-        const firstToken = withoutLeadingMoveNumber.match(/^([^\s{}()]+)/)?.[1] ?? null;
-
-        if (!firstToken) return null;
-        if (["*", "1-0", "0-1", "1/2-1/2"].includes(firstToken)) return null;
-        return firstToken;
+    const getFirstMove = (raw: string): string | null => {
+        const cleaned = raw.replace(/^\s*(?:\[[^\]]*\]\s*)*/, "").trim();
+        const token = cleaned.replace(/^\d+\.(?:\.\.)?\s*/, "").match(/^([^\s{}()]+)/)?.[1];
+        if (!token || ["*", "1-0", "0-1", "1/2-1/2"].includes(token)) return null;
+        return token;
     };
 
     const moveFromUci = (uci: string) => {
-        const uciMatch = uci.match(/^([a-h][1-8])([a-h][1-8])([qrbn])?$/i);
-        if (!uciMatch) return null;
-        const [, from, to, promotion] = uciMatch;
-        return { from, to, promotion: promotion?.toLowerCase() as "q" | "r" | "b" | "n" | undefined };
+        const m = uci.match(/^([a-h][1-8])([a-h][1-8])([qrbn])?$/i);
+        if (!m) return null;
+        return { from: m[1], to: m[2], promotion: m[3]?.toLowerCase() as "q" | "r" | "b" | "n" | undefined };
     };
 
-    const applyEngineMove = (rawMove: string): boolean => {
+    const applyMove = (rawMove: string): boolean => {
         if (!gameRef.current) return false;
         let moved = gameRef.current.move(rawMove);
         if (!moved) {
             const parsed = moveFromUci(rawMove);
-            if (parsed) {
-                moved = gameRef.current.move(parsed);
-            }
+            if (parsed) moved = gameRef.current.move(parsed);
         }
-
         if (!moved) {
-            console.warn(`Invalid AI move received: ${rawMove}`);
-            setStatus(`Engine sent invalid move: ${rawMove}`);
+            console.warn(`Invalid move: ${rawMove}`);
             return false;
         }
-
         setBoardPos(gameRef.current.fen());
         setMoveHistory(gameRef.current.history());
         return true;
     };
 
-    const parseServerMessage = (raw: string): ServerMessage | null => {
-        try {
-            const parsed = JSON.parse(raw) as ServerMessage;
-            if (parsed && typeof parsed.type === "string") {
-                return parsed;
-            }
-        } catch {
-            const chessingtonMove = getFirstMoveFromPgn(raw);
-            if (chessingtonMove) {
-                return { type: "chessington_move", move: chessingtonMove };
-            }
-        }
-
-        return null;
+    const getMovetext = (): string => {
+        if (!gameRef.current) return "1. ";
+        const re = /^\s*(?:\[[^\]]*]\s*)*(\d+\.\s[\s\S]*?)(?:\s(?:1-0|0-1|1\/2-1\/2|\*)\s*)?$/;
+        return gameRef.current.pgn().match(re)?.[1] ?? "1. ";
     };
 
-    const onMessageReceived = (event: MessageEvent) => {
-        if (typeof event.data !== "string") return;
-        const payload = parseServerMessage(event.data);
-        if (!payload) return;
-
+    const onServerMessage = useCallback((payload: ServerMessage) => {
         if (payload.type === "error") {
-            setStatus(payload.message ?? "Engine error");
-            setAwaitingEngineMove(false);
-            return;
-        }
-
-        if (payload.type === "game_saved") {
-            if (payload.path) {
-                setStatus(`Saved PGN: ${payload.path}`);
-            }
-            return;
-        }
-
-        if (payload.type === "model_list") {
-            const models = Array.isArray(payload.models) ? payload.models : [];
-            setAvailableModels(models);
-            setSelectedModel(payload.current_model ?? models[0]?.name ?? "");
-            if (payload.current_model) {
-                setStatus(`Connected (model: ${payload.current_model})`);
-            }
-            return;
-        }
-
-        if (payload.type === "model_selected") {
-            if (payload.current_model) {
-                setSelectedModel(payload.current_model);
-                setStatus(`Model selected: ${payload.current_model}`);
-            }
+            setAwaitingEngine(false);
             return;
         }
 
         if (!payload.move) return;
-        const normalizedMove =
+        const move =
             payload.type === "chessington_move"
-                ? (getFirstMoveFromPgn(payload.move) ?? payload.move)
+                ? (getFirstMove(payload.move) ?? payload.move)
                 : payload.move;
-        const applied = applyEngineMove(normalizedMove);
-        if (!applied) {
-            if (payload.type === "chessington_move" && chessingtonRetryCountRef.current < maxChessingtonRetries) {
-                chessingtonRetryCountRef.current += 1;
-                setStatus(
-                    `Chessington sent invalid move, retrying (${chessingtonRetryCountRef.current}/${maxChessingtonRetries})`,
+
+        if (!applyMove(move)) {
+            if (payload.type === "chessington_move" && retryCountRef.current < MAX_RETRIES) {
+                retryCountRef.current += 1;
+                server.setStatus(
+                    `Invalid move, retrying (${retryCountRef.current}/${MAX_RETRIES})`,
                 );
-                setAwaitingEngineMove(true);
-                requestChessingtonMove();
+                server.requestChessingtonMove(getMovetext());
                 return;
             }
-
-            setAwaitingEngineMove(false);
+            setAwaitingEngine(false);
             return;
         }
 
-        chessingtonRetryCountRef.current = 0;
-        setAwaitingEngineMove(false);
-        setStatus(payload.type === "stockfish_bestmove" ? "Stockfish moved" : "Chessington moved");
-    };
+        retryCountRef.current = 0;
+        setAwaitingEngine(false);
+        server.setStatus(payload.type === "stockfish_bestmove" ? "Stockfish moved" : "Chessington moved");
+    }, []);
 
-    const onConnected = () => {
-        setStatus("Connected");
-        requestModelList();
-    };
+    const server = useChessServer(onServerMessage);
 
-    const sendMessage = (payload: object) => {
-        if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
-            setStatus("Server disconnected");
-            setAwaitingEngineMove(false);
-            return;
+    const startGame = (mode: GameMode, forcedColor?: "w" | "b") => {
+        if (autoPlayTimerRef.current) {
+            window.clearTimeout(autoPlayTimerRef.current);
+            autoPlayTimerRef.current = null;
         }
 
-        socketRef.current.send(JSON.stringify(payload));
-    };
+        const color = mode === "chessington-vs-stockfish" ? (forcedColor ?? chessingtonColor) : "b";
+        if (mode === "chessington-vs-stockfish") setChessingtonColor(color);
 
-    const connectToServer = () => {
-        if (socketRef.current?.readyState === WebSocket.OPEN) return;
-        const ws = new WebSocket("ws://localhost:8765");
-        ws.onmessage = onMessageReceived;
-        ws.onopen = onConnected;
-        ws.onclose = () => {
-            setStatus("Disconnected");
-        };
-        socketRef.current = ws;
-        setStatus("Connecting...");
-    };
+        const newGame = new Chess(DEFAULT_FEN);
+        const players = getPlayers(mode, color);
+        newGame.header(
+            "Event", "Chessington Arena",
+            "Site", "Local",
+            "White", players.white,
+            "Black", players.black,
+            "Date", new Date().toISOString().slice(0, 10).replaceAll("-", "."),
+        );
 
-    const requestModelList = () => {
-        sendMessage({ action: "list_models" });
-    };
-
-    const selectModel = (modelName: string) => {
-        if (!modelName) return;
-        setStatus(`Switching model to ${modelName}...`);
-        sendMessage({ action: "set_model", model_name: modelName });
-    };
-
-    const getMovetext = (): string | null => {
-        if (!gameRef.current) return null;
-        const re = /^\s*(?:\[[^\]]*]\s*)*(\d+\.\s[\s\S]*?)(?:\s(?:1-0|0-1|1\/2-1\/2|\*)\s*)?$/;
-        const match = gameRef.current.pgn().match(re);
-        return match?.[1] ?? null;
-    };
-
-    const requestChessingtonMove = () => {
-        const movetext = getMovetext() ?? "1. ";
-        sendMessage({ action: "chessington_move", pgn: movetext });
-    };
-
-    const requestStockfishMove = () => {
-        if (!gameRef.current) {
-            setAwaitingEngineMove(false);
-            return;
-        }
-
-        sendMessage({
-            action: "stockfish_bestmove",
-            fen: gameRef.current.fen(),
-            movetime: stockfishConfig.movetime,
-            nodes: stockfishConfig.nodes > 0 ? stockfishConfig.nodes : undefined,
-            depth: stockfishConfig.depth > 0 ? stockfishConfig.depth : undefined,
-        });
-    };
-
-    const saveCurrentGamePgn = () => {
-        if (!gameRef.current) return;
-        const pgn = gameRef.current.pgn();
-        if (!pgn.trim() || pgn === lastSavedPgnRef.current) return;
-
-        const players = getPlayersForMode(gameMode, engineChessingtonColor);
-        sendMessage({
-            action: "save_game_pgn",
-            pgn,
-            white: players.white,
-            black: players.black,
-        });
-        lastSavedPgnRef.current = pgn;
-    };
-
-    const recordSessionMatch = (pgnResult: string) => {
-        if (!gameRef.current || gameMode !== "chessington-vs-stockfish") return;
-        const pgn = gameRef.current.pgn();
-        if (!pgn || pgn === lastRecordedResultPgnRef.current) return;
-
-        setSessionMatches((previous) => [
-            ...previous,
-            {
-                index: previous.length + 1,
-                chessingtonColor: engineChessingtonColor === "w" ? "White" : "Black",
-                result: getChessingtonResult(pgnResult, engineChessingtonColor),
-                pgnResult,
-            },
-        ]);
-        lastRecordedResultPgnRef.current = pgn;
+        setGame(newGame);
+        setMoveHistory([]);
+        setGameMode(mode);
+        setAwaitingEngine(false);
+        setBoardPos(newGame.fen());
+        gameRef.current = newGame;
+        retryCountRef.current = 0;
+        lastSavedPgnRef.current = "";
+        lastRecordedRef.current = "";
+        server.setStatus(
+            mode === "human-vs-chessington" ? "Your move" : "Chessington vs Stockfish",
+        );
     };
 
     const pieceMoved = (fen: string) => {
         setBoardPos(fen);
-        if (gameRef.current) {
-            setMoveHistory(gameRef.current.history());
-        }
+        if (gameRef.current) setMoveHistory(gameRef.current.history());
         if (!gameRef.current || gameMode !== "human-vs-chessington") return;
         if (gameRef.current.turn() === "b") {
-            setAwaitingEngineMove(true);
-            requestChessingtonMove();
+            setAwaitingEngine(true);
+            server.requestChessingtonMove(getMovetext());
         }
     };
 
+    const exportPgn = () => {
+        if (!game) return;
+        const pgn = game.pgn();
+        if (!pgn.trim()) return;
+        const blob = new Blob([pgn], { type: "application/x-chess-pgn" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${getPlayers(gameMode, chessingtonColor).white.toLowerCase()}-vs-${getPlayers(gameMode, chessingtonColor).black.toLowerCase()}.pgn`.replaceAll(" ", "-");
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    };
+
+    const recordMatch = (result: string) => {
+        if (!gameRef.current || gameMode !== "chessington-vs-stockfish") return;
+        const pgn = gameRef.current.pgn();
+        if (!pgn || pgn === lastRecordedRef.current) return;
+        setSessionMatches((prev) => [
+            ...prev,
+            {
+                index: prev.length + 1,
+                chessingtonColor: chessingtonColor === "w" ? "White" : "Black",
+                result: getChessingtonResult(result, chessingtonColor),
+                pgnResult: result,
+            },
+        ]);
+        lastRecordedRef.current = pgn;
+    };
+
+    // Cleanup
     useEffect(() => {
         return () => {
-            if (autoPlayTimerRef.current) {
-                window.clearTimeout(autoPlayTimerRef.current);
-            }
-            socketRef.current?.close();
+            if (autoPlayTimerRef.current) window.clearTimeout(autoPlayTimerRef.current);
         };
     }, []);
 
+    // Engine game loop
     useEffect(() => {
         if (gameMode !== "chessington-vs-stockfish") return;
-        if (!gameRef.current || awaitingEngineMove) return;
+        if (!gameRef.current || awaitingEngine) return;
+
         if (gameRef.current.isGameOver()) {
             const result = getGameResult(gameRef.current);
             gameRef.current.setHeader("Result", result);
-            recordSessionMatch(result);
-            saveCurrentGamePgn();
-            if (autoPlayEngineMatches) {
-                setStatus(`Game over (${result}). Starting next game...`);
+            recordMatch(result);
+
+            const pgn = gameRef.current.pgn();
+            if (pgn.trim() && pgn !== lastSavedPgnRef.current) {
+                const players = getPlayers(gameMode, chessingtonColor);
+                server.saveGame(pgn, players.white, players.black);
+                lastSavedPgnRef.current = pgn;
+            }
+
+            if (autoPlay) {
+                server.setStatus(`Game over (${result}). Next game...`);
                 if (!autoPlayTimerRef.current) {
-                    const nextChessingtonColor = engineChessingtonColor === "w" ? "b" : "w";
+                    const nextColor = chessingtonColor === "w" ? "b" : "w";
                     autoPlayTimerRef.current = window.setTimeout(() => {
                         autoPlayTimerRef.current = null;
-                        startChessGame("chessington-vs-stockfish", nextChessingtonColor);
+                        startGame("chessington-vs-stockfish", nextColor);
                     }, 1200);
                 }
             } else {
-                setStatus(`Game over (${result})`);
+                server.setStatus(`Game over (${result})`);
             }
-
-            setAwaitingEngineMove(false);
             return;
         }
 
-        setAwaitingEngineMove(true);
-        const isChessingtonTurn = gameRef.current.turn() === engineChessingtonColor;
-        if (isChessingtonTurn) {
-            requestChessingtonMove();
-            return;
+        setAwaitingEngine(true);
+        if (gameRef.current.turn() === chessingtonColor) {
+            server.requestChessingtonMove(getMovetext());
+        } else {
+            server.requestStockfishMove(gameRef.current.fen(), stockfishConfig);
         }
+    }, [boardPos, gameMode, awaitingEngine, autoPlay, chessingtonColor]);
 
-        requestStockfishMove();
-    }, [boardPos, gameMode, awaitingEngineMove, autoPlayEngineMatches, engineChessingtonColor]);
+    const players = getPlayers(gameMode, chessingtonColor);
 
     return (
-        <div className="flex flex-col w-full h-full">
-            <div className="w-full flex flex-row justify-center">
-                <h1 className="text-3xl">Chessington Arena</h1>
-            </div>
-            <div className="w-full flex h-full flex-col justify-center">
-                <button onClick={connectToServer}>Connect</button>
-                <div className="w-full text-center text-sm text-stone-400">Status: {status}</div>
-                <div className="w-full flex flex-row justify-center gap-3 text-xs py-2">
-                    <span className="px-2 py-1 rounded bg-stone-200 text-stone-900">
-                        White: {getPlayersForMode(gameMode, engineChessingtonColor).white}
-                    </span>
-                    <span className="px-2 py-1 rounded bg-stone-800 text-stone-100">
-                        Black: {getPlayersForMode(gameMode, engineChessingtonColor).black}
-                    </span>
-                    {gameRef.current && (
-                        <span className="px-2 py-1 rounded border border-stone-500 text-stone-300">
-                            Turn: {gameRef.current.turn() === "w" ? "White" : "Black"}
-                        </span>
+        <div className="flex flex-col h-full bg-[var(--bg)]">
+            {/* Header */}
+            <header className="flex items-center justify-between px-6 py-3 border-b border-stone-800">
+                <h1 className="text-lg font-semibold text-stone-200 tracking-tight">
+                    Chessington Arena
+                </h1>
+                <div className="flex items-center gap-3">
+                    <span className="text-xs text-stone-500">{server.status}</span>
+                    {server.status === "Disconnected" && (
+                        <button
+                            className="px-3 py-1.5 text-xs font-medium rounded-md bg-purple-600 hover:bg-purple-500 text-white transition-colors"
+                            onClick={server.connect}
+                            type="button"
+                        >
+                            Connect
+                        </button>
                     )}
                 </div>
-                <div className="w-full  flex flex-row h-full justify-center">
-                    <div className="flex flex-row w-1/5 flex-3  justify-center ">
+            </header>
+
+            {/* Main content */}
+            <div className="flex-1 flex items-center justify-center gap-6 p-6 min-h-0">
+                {/* Board */}
+                <div className="flex flex-col items-center gap-2">
+                    {gameRef.current && (
+                        <div className="flex gap-4 text-xs mb-1">
+                            <span className="px-2.5 py-1 rounded-md bg-stone-200 text-stone-900 font-medium">
+                                {players.white}
+                            </span>
+                            <span className="px-2.5 py-1 rounded-md bg-stone-800 text-stone-200 font-medium">
+                                {players.black}
+                            </span>
+                            <span className="px-2.5 py-1 rounded-md border border-stone-700 text-stone-400">
+                                {gameRef.current.turn() === "w" ? "White" : "Black"} to move
+                            </span>
+                        </div>
+                    )}
+                    <div className="w-[min(55vh,550px)] aspect-square">
                         <Board
                             currentGame={game}
                             pieceMoved={pieceMoved}
                             boardPos={boardPos}
-                            canUserMove={gameMode === "human-vs-chessington" && !awaitingEngineMove && gameRef.current?.turn() === "w"}
+                            canUserMove={
+                                gameMode === "human-vs-chessington" &&
+                                !awaitingEngine &&
+                                gameRef.current?.turn() === "w"
+                            }
                         />
                     </div>
-                    <div className="flex h-full flex-col justify-center w-1/4 ">
-                        <div className="flex flex-row justify-center w-full h-3/4">
-                            <MoveBoard
-                                currentGame={game}
-                                boardPos={boardPos}
-                                moveHistory={moveHistory}
-                                status={status}
-                                gameMode={gameMode}
-                                whitePlayer={getPlayersForMode(gameMode, engineChessingtonColor).white}
-                                blackPlayer={getPlayersForMode(gameMode, engineChessingtonColor).black}
-                                stockfishConfig={stockfishConfig}
-                                onStockfishConfigChange={setStockfishConfig}
-                                autoPlay={autoPlayEngineMatches}
-                                onAutoPlayChange={setAutoPlayEngineMatches}
-                                sessionMatches={sessionMatches}
-                                onResetSessionMatches={() => {
-                                    setSessionMatches([]);
-                                    lastRecordedResultPgnRef.current = "";
-                                }}
-                                availableModels={availableModels}
-                                selectedModel={selectedModel}
-                                onRefreshModels={requestModelList}
-                                onSelectModel={selectModel}
-                                startHumanGame={() => {
-                                    startChessGame("human-vs-chessington");
-                                }}
-                                startEngineMatch={() => {
-                                    startChessGame("chessington-vs-stockfish");
-                                }}
-                            />
-                        </div>
-                    </div>
+                </div>
+
+                {/* Side panel */}
+                <div className="w-72 h-[min(60vh,600px)] shrink-0">
+                    <MovePanel
+                        currentGame={game}
+                        moveHistory={moveHistory}
+                        gameMode={gameMode}
+                        whitePlayer={players.white}
+                        blackPlayer={players.black}
+                        stockfishConfig={stockfishConfig}
+                        onStockfishConfigChange={setStockfishConfig}
+                        autoPlay={autoPlay}
+                        onAutoPlayChange={setAutoPlay}
+                        sessionMatches={sessionMatches}
+                        onResetSessionMatches={() => {
+                            setSessionMatches([]);
+                            lastRecordedRef.current = "";
+                        }}
+                        availableModels={server.availableModels}
+                        selectedModel={server.selectedModel}
+                        onRefreshModels={server.refreshModels}
+                        onSelectModel={server.selectModel}
+                        startHumanGame={() => startGame("human-vs-chessington")}
+                        startEngineMatch={() => startGame("chessington-vs-stockfish")}
+                        onExportPgn={exportPgn}
+                    />
                 </div>
             </div>
         </div>
