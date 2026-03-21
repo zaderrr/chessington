@@ -12,4 +12,5 @@ web/dist/
 web/.eslintrc.js.bak
 **/source.csv
 **/puzzles.json
+**/__pycache__
 models/

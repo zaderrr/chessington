@@ -163,9 +163,13 @@ class InferenceEngine:
         training_dir = os.getenv("CHESSINGTON_TRAINING_DIR") or CONFIG.get(
             "training_dir", ""
         )
-        self.training_dir = (
-            Path(str(training_dir)).expanduser() if training_dir else None
-        )
+        if training_dir:
+            td = Path(str(training_dir)).expanduser()
+            if not td.is_absolute():
+                td = (Path(__file__).resolve().parent.parent / td).resolve()
+            self.training_dir = td
+        else:
+            self.training_dir = None
 
         ckpt_value = os.getenv("CHESSINGTON_CKPT") or CONFIG.get("checkpoint_path", "")
         self.ckpt_path = Path(str(ckpt_value)).expanduser() if ckpt_value else None
@@ -299,15 +303,15 @@ class InferenceEngine:
                 sys.path.insert(0, str(self.training_dir))
 
             try:
-                infer_small_llm = importlib.import_module("infer_small_llm")
+                infer_mod = importlib.import_module("infer")
             except Exception as exc:
                 raise RuntimeError(
                     f"Failed to import inference modules from {self.training_dir}: {exc}"
                 ) from exc
 
-            load_checkpoint = infer_small_llm.load_checkpoint
-            build_model_from_checkpoint = infer_small_llm.build_model_from_checkpoint
-            self._run_once = infer_small_llm.run_once
+            load_checkpoint = infer_mod.load_checkpoint
+            build_model_from_checkpoint = infer_mod.build_model_from_checkpoint
+            self._run_once = infer_mod.run_once
 
             if self.ckpt_path is None:
                 options = self._discover_model_options()

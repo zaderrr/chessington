@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""SFT training on tokenized chess data using ids+lossmask binaries.
-
-Reuses model-loading utilities from ~/Documents/Projects/ai/models/training.
-"""
+"""SFT training on tokenized chess data using ids+lossmask binaries."""
 
 from __future__ import annotations
 
@@ -38,10 +35,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir", type=Path, required=True)
 
     p.add_argument(
-        "--ai-training-dir",
+        "--training-dir",
         type=Path,
-        default=Path("~/Documents/Projects/ai/models/training").expanduser(),
-        help="Directory containing model_loader.py, train_small_llm.py, train_llm.py",
+        default=Path(__file__).resolve().parents[2] / "pre-training",
+        help="Directory containing model_loader.py and train_model.py",
     )
 
     p.add_argument("--dtype", choices=["uint16", "uint32"], default="uint16")
@@ -157,12 +154,12 @@ def main() -> None:
         raise SystemExit(f"ids bin not found: {args.ids_bin}")
     if not args.loss_mask_bin.exists():
         raise SystemExit(f"loss mask bin not found: {args.loss_mask_bin}")
-    if not args.ai_training_dir.exists():
-        raise SystemExit(f"ai training dir not found: {args.ai_training_dir}")
+    if not args.training_dir.exists():
+        raise SystemExit(f"training dir not found: {args.training_dir}")
 
-    ai_training_dir = str(args.ai_training_dir.resolve())
-    if ai_training_dir not in sys.path:
-        sys.path.insert(0, ai_training_dir)
+    training_dir = str(args.training_dir.resolve())
+    if training_dir not in sys.path:
+        sys.path.insert(0, training_dir)
 
     from model_loader import build_model_from_ckpt, detect_model_arch
 

@@ -1,5 +1,5 @@
 {
-    "training_dir": "",
+    "training_dir": "pipeline/inference",
     "checkpoint_path": "",
     "models_dir": "models",
     "models": [
