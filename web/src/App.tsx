@@ -2,8 +2,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import Board from "./components/Board";
 import MovePanel from "./components/MovePanel";
+import BenchmarkPanel from "./components/BenchmarkPanel";
+import PuzzleMoves from "./components/PuzzleMoves";
 import { useChessServer } from "./hooks/useChessServer";
-import { DEFAULT_FEN, type GameMode, type SessionMatch, type StockfishConfig, type ServerMessage } from "./types";
+import {
+    DEFAULT_FEN,
+    type GameMode,
+    type SessionMatch,
+    type StockfishConfig,
+    type ServerMessage,
+    type BenchmarkSummary,
+    type BenchmarkPuzzleResult,
+} from "./types";
+
+type AppView = "play" | "benchmark";
 
 const MAX_RETRIES = 5;
 
@@ -28,6 +40,7 @@ const getChessingtonResult = (pgn: string, color: "w" | "b"): "W" | "L" | "D" =>
 };
 
 function App() {
+    const [view, setView] = useState<AppView>("play");
     const [game, setGame] = useState<Chess | null>(null);
     const [boardPos, setBoardPos] = useState(DEFAULT_FEN);
     const [moveHistory, setMoveHistory] = useState<string[]>([]);
@@ -41,6 +54,15 @@ function App() {
         nodes: 0,
         depth: 0,
     });
+
+    // Benchmark state
+    const [benchmarkRunning, setBenchmarkRunning] = useState(false);
+    const [benchmarkCompleted, setBenchmarkCompleted] = useState(0);
+    const [benchmarkTotal, setBenchmarkTotal] = useState(0);
+    const [benchmarkSummary, setBenchmarkSummary] = useState<BenchmarkSummary | null>(null);
+    const [benchmarkLatest, setBenchmarkLatest] = useState<BenchmarkPuzzleResult | null>(null);
+    const [benchmarkFen, setBenchmarkFen] = useState<string | null>(null);
+    const [puzzleMoveIndex, setPuzzleMoveIndex] = useState<number | null>(null);
 
     const gameRef = useRef<Chess | null>(null);
     const retryCountRef = useRef(0);
@@ -84,6 +106,36 @@ function App() {
     };
 
     const onServerMessage = useCallback((payload: ServerMessage) => {
+        // Benchmark messages
+        if (payload.type === "benchmark_started") {
+            setBenchmarkRunning(true);
+            setBenchmarkCompleted(0);
+            setBenchmarkTotal(payload.puzzle_count ?? 0);
+            setBenchmarkSummary(null);
+            setBenchmarkLatest(null);
+            return;
+        }
+        if (payload.type === "benchmark_progress") {
+            setBenchmarkCompleted(payload.completed ?? 0);
+            setBenchmarkTotal(payload.total ?? 0);
+            if (payload.summary) setBenchmarkSummary(payload.summary);
+            if (payload.latest_result) {
+                setBenchmarkLatest(payload.latest_result);
+                setPuzzleMoveIndex(null);
+            }
+            if (payload.current_fen) setBenchmarkFen(payload.current_fen);
+            return;
+        }
+        if (payload.type === "benchmark_complete") {
+            setBenchmarkRunning(false);
+            if (payload.summary) setBenchmarkSummary(payload.summary);
+            return;
+        }
+        if (payload.type === "benchmark_stopping") {
+            return;
+        }
+
+        // Game messages
         if (payload.type === "error") {
             setAwaitingEngine(false);
             return;
@@ -238,13 +290,56 @@ function App() {
 
     const players = getPlayers(gameMode, chessingtonColor);
 
+    // Determine which FEN to show on the board
+    let displayFen = boardPos;
+    if (view === "benchmark") {
+        if (puzzleMoveIndex !== null && benchmarkLatest?.sequence) {
+            if (puzzleMoveIndex === -1) {
+                displayFen = benchmarkLatest.fen;
+            } else {
+                displayFen = benchmarkLatest.sequence[puzzleMoveIndex]?.fen_after ?? benchmarkLatest.fen;
+            }
+        } else if (benchmarkLatest?.sequence?.length) {
+            // Show the final position by default
+            displayFen = benchmarkLatest.sequence[benchmarkLatest.sequence.length - 1].fen_after;
+        } else if (benchmarkFen) {
+            displayFen = benchmarkFen;
+        }
+    }
+
     return (
         <div className="flex flex-col h-full bg-[var(--bg)]">
             {/* Header */}
             <header className="flex items-center justify-between px-6 py-3 border-b border-stone-800">
-                <h1 className="text-lg font-semibold text-stone-200 tracking-tight">
-                    Chessington Arena
-                </h1>
+                <div className="flex items-center gap-4">
+                    <h1 className="text-lg font-semibold text-stone-200 tracking-tight">
+                        Chessington Arena
+                    </h1>
+                    <nav className="flex gap-1">
+                        <button
+                            className={`px-3 py-1 text-xs rounded-md transition-colors ${
+                                view === "play"
+                                    ? "bg-stone-700 text-stone-100"
+                                    : "text-stone-400 hover:text-stone-200 hover:bg-stone-800"
+                            }`}
+                            onClick={() => setView("play")}
+                            type="button"
+                        >
+                            Play
+                        </button>
+                        <button
+                            className={`px-3 py-1 text-xs rounded-md transition-colors ${
+                                view === "benchmark"
+                                    ? "bg-stone-700 text-stone-100"
+                                    : "text-stone-400 hover:text-stone-200 hover:bg-stone-800"
+                            }`}
+                            onClick={() => setView("benchmark")}
+                            type="button"
+                        >
+                            Benchmark
+                        </button>
+                    </nav>
+                </div>
                 <div className="flex items-center gap-3">
                     <span className="text-xs text-stone-500">{server.status}</span>
                     {server.status === "Disconnected" && (
@@ -263,7 +358,7 @@ function App() {
             <div className="flex-1 flex items-center justify-center gap-6 p-6 min-h-0">
                 {/* Board */}
                 <div className="flex flex-col items-center gap-2">
-                    {gameRef.current && (
+                    {view === "play" && gameRef.current && (
                         <div className="flex gap-4 text-xs mb-1">
                             <span className="px-2.5 py-1 rounded-md bg-stone-200 text-stone-900 font-medium">
                                 {players.white}
@@ -276,12 +371,31 @@ function App() {
                             </span>
                         </div>
                     )}
+                    {view === "benchmark" && benchmarkFen && (
+                        <div className="flex gap-3 text-xs mb-1">
+                            <span className="px-2.5 py-1 rounded-md bg-purple-900/50 border border-purple-700/50 text-purple-300">
+                                Puzzle {benchmarkCompleted}/{benchmarkTotal}
+                            </span>
+                            {benchmarkLatest && (
+                                <span
+                                    className={`px-2.5 py-1 rounded-md font-medium ${
+                                        benchmarkLatest.correct_predictions === benchmarkLatest.total_predictions
+                                            ? "bg-emerald-900/50 text-emerald-300"
+                                            : "bg-red-900/50 text-red-300"
+                                    }`}
+                                >
+                                    Last: {benchmarkLatest.depth}
+                                </span>
+                            )}
+                        </div>
+                    )}
                     <div className="w-[min(55vh,550px)] aspect-square">
                         <Board
-                            currentGame={game}
+                            currentGame={view === "play" ? game : null}
                             pieceMoved={pieceMoved}
-                            boardPos={boardPos}
+                            boardPos={displayFen}
                             canUserMove={
+                                view === "play" &&
                                 gameMode === "human-vs-chessington" &&
                                 !awaitingEngine &&
                                 gameRef.current?.turn() === "w"
@@ -290,32 +404,61 @@ function App() {
                     </div>
                 </div>
 
-                {/* Side panel */}
-                <div className="w-72 h-[min(60vh,600px)] shrink-0">
-                    <MovePanel
-                        currentGame={game}
-                        moveHistory={moveHistory}
-                        gameMode={gameMode}
-                        whitePlayer={players.white}
-                        blackPlayer={players.black}
-                        stockfishConfig={stockfishConfig}
-                        onStockfishConfigChange={setStockfishConfig}
-                        autoPlay={autoPlay}
-                        onAutoPlayChange={setAutoPlay}
-                        sessionMatches={sessionMatches}
-                        onResetSessionMatches={() => {
-                            setSessionMatches([]);
-                            lastRecordedRef.current = "";
-                        }}
-                        availableModels={server.availableModels}
-                        selectedModel={server.selectedModel}
-                        onRefreshModels={server.refreshModels}
-                        onSelectModel={server.selectModel}
-                        startHumanGame={() => startGame("human-vs-chessington")}
-                        startEngineMatch={() => startGame("chessington-vs-stockfish")}
-                        onExportPgn={exportPgn}
-                    />
-                </div>
+                {/* Side panels */}
+                {view === "play" && (
+                    <div className="w-80 h-[min(65vh,650px)] shrink-0">
+                        <MovePanel
+                            currentGame={game}
+                            moveHistory={moveHistory}
+                            gameMode={gameMode}
+                            whitePlayer={players.white}
+                            blackPlayer={players.black}
+                            stockfishConfig={stockfishConfig}
+                            onStockfishConfigChange={setStockfishConfig}
+                            autoPlay={autoPlay}
+                            onAutoPlayChange={setAutoPlay}
+                            sessionMatches={sessionMatches}
+                            onResetSessionMatches={() => {
+                                setSessionMatches([]);
+                                lastRecordedRef.current = "";
+                            }}
+                            availableModels={server.availableModels}
+                            selectedModel={server.selectedModel}
+
+                            onSelectModel={server.selectModel}
+                            startHumanGame={() => startGame("human-vs-chessington")}
+                            startEngineMatch={() => startGame("chessington-vs-stockfish")}
+                            onExportPgn={exportPgn}
+                        />
+                    </div>
+                )}
+                {view === "benchmark" && (
+                    <div className="flex gap-4 h-[min(65vh,650px)] shrink-0">
+                        {benchmarkLatest && (
+                            <div className="w-56">
+                                <PuzzleMoves
+                                    result={benchmarkLatest}
+                                    selectedIndex={puzzleMoveIndex}
+                                    onSelectMove={(i) => setPuzzleMoveIndex(i)}
+                                />
+                            </div>
+                        )}
+                        <div className="w-80">
+                            <BenchmarkPanel
+                                running={benchmarkRunning}
+                                completed={benchmarkCompleted}
+                                total={benchmarkTotal}
+                                summary={benchmarkSummary}
+                                availableModels={server.availableModels}
+                                selectedModel={server.selectedModel}
+                                onSelectModel={server.selectModel}
+    
+                                onStart={server.startBenchmark}
+                                onStop={server.stopBenchmark}
+                            />
+                        </div>
+                    </div>
+                )}
             </div>
         </div>
     );

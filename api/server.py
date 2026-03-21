@@ -513,7 +513,369 @@ HOST = str(os.getenv("CHESSINGTON_HOST") or CONFIG.get("host", "localhost"))
 PORT = int(os.getenv("CHESSINGTON_PORT") or CONFIG.get("port", 8765))
 
 
+# ---------------------------------------------------------------------------
+# Benchmark helpers
+# ---------------------------------------------------------------------------
+
+def benchmarks_dir() -> Path:
+    path = Path(__file__).resolve().parents[1] / "data" / "benchmarks"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def puzzles_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "benchmarks" / "puzzles" / "puzzles.json"
+
+
+def load_puzzles() -> list:
+    path = puzzles_path()
+    if not path.exists():
+        raise FileNotFoundError(f"Puzzles file not found: {path}")
+    with path.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, list):
+        raise ValueError("puzzles.json must be a JSON array")
+    return data
+
+
+def _extract_movetext_to_fen(pgn_text: str, target_fen: str) -> Optional[str]:
+    """Parse a full PGN and return movetext up to (not including) the target FEN."""
+    game = chess_pgn.read_game(StringIO(pgn_text))
+    if game is None:
+        return None
+
+    target_parts = target_fen.split()[:4]
+    board = game.board()
+
+    if board.fen().split()[:4] == target_parts:
+        return ""
+
+    collected_moves: list[tuple] = []
+    node = game
+    while node.variations:
+        next_node = node.variations[0]
+        collected_moves.append((board.copy(), next_node.move))
+        board.push(next_node.move)
+        if board.fen().split()[:4] == target_parts:
+            break
+        node = next_node
+    else:
+        return None
+
+    parts: list[str] = []
+    for b, m in collected_moves:
+        san = b.san(m)
+        if b.turn == chess.WHITE:
+            parts.append(f"{b.fullmove_number}. {san}")
+        else:
+            if not parts:
+                parts.append(f"{b.fullmove_number}... {san}")
+            else:
+                parts.append(san)
+    return " ".join(parts)
+
+
+def _append_move_san(movetext: str, board, move) -> str:
+    """Append a move to PGN movetext with proper numbering. Board is BEFORE the move."""
+    san = board.san(move)
+    if board.turn == chess.WHITE:
+        prefix = f"{board.fullmove_number}."
+        if movetext:
+            return f"{movetext} {prefix} {san}"
+        return f"{prefix} {san}"
+    else:
+        if not movetext:
+            return f"{board.fullmove_number}... {san}"
+        return f"{movetext} {san}"
+
+
+def _parse_predicted_move(predicted: str, board) -> Optional[object]:
+    """Try to parse a predicted move string as a chess.Move on the given board."""
+    try:
+        return board.parse_san(predicted)
+    except Exception:
+        pass
+    if re.match(r"^[a-h][1-8][a-h][1-8][qrbn]?$", predicted.lower()):
+        try:
+            move = chess.Move.from_uci(predicted.lower())
+            if move in board.legal_moves:
+                return move
+        except Exception:
+            pass
+    return None
+
+
+def _moves_match(predicted: Optional[str], expected_uci: str, board) -> bool:
+    """Check if a predicted move matches the expected move, or is an
+    equally valid checkmate when multiple mating moves exist."""
+    if not predicted:
+        return False
+    try:
+        expected_move = chess.Move.from_uci(expected_uci)
+    except Exception:
+        return False
+
+    predicted_move = _parse_predicted_move(predicted, board)
+    if predicted_move is None:
+        return False
+    if predicted_move == expected_move:
+        return True
+
+    # Accept alternative checkmates: if the expected move is mate and
+    # the predicted move is also mate, count it as correct.
+    board.push(expected_move)
+    expected_is_mate = board.is_checkmate()
+    board.pop()
+    if expected_is_mate:
+        board.push(predicted_move)
+        predicted_is_mate = board.is_checkmate()
+        board.pop()
+        if predicted_is_mate:
+            return True
+
+    return False
+
+
+def process_puzzle(puzzle: dict, inf_engine: InferenceEngine) -> dict:
+    """Run a single puzzle through the engine, returning per-move results."""
+    fen = puzzle["Starting position"]
+    uci_moves = puzzle["Moves"].split()
+    pgn_text = puzzle.get("PGN", "")
+
+    context = _extract_movetext_to_fen(pgn_text, fen)
+    if context is None:
+        context = ""
+
+    board = chess.Board(fen)
+    movetext = context
+
+    setup_uci = uci_moves[0]
+    setup_move = chess.Move.from_uci(setup_uci)
+    setup_san = board.san(setup_move)
+    setup_side = "w" if board.turn == chess.WHITE else "b"
+    movetext = _append_move_san(movetext, board, setup_move)
+    board.push(setup_move)
+
+    move_results: list[dict] = []
+    full_sequence: list[dict] = [
+        {
+            "san": setup_san,
+            "uci": setup_uci,
+            "side": setup_side,
+            "role": "setup",
+            "fen_after": board.fen(),
+        }
+    ]
+
+    for i in range(1, len(uci_moves)):
+        expected_uci = uci_moves[i]
+        expected_move = chess.Move.from_uci(expected_uci)
+        expected_san = board.san(expected_move)
+        move_side = "w" if board.turn == chess.WHITE else "b"
+
+        if i % 2 == 1:
+            predicted = None
+            correct = False
+            try:
+                prompt = movetext
+                if inf_engine.is_sft_model:
+                    side_token = (
+                        inf_engine.sft_white_win_token
+                        if board.turn == chess.WHITE
+                        else inf_engine.sft_black_win_token
+                    )
+                    prompt = f"{side_token} {movetext}".strip()
+                raw = inf_engine.infer(prompt)
+                predicted = first_move_token(raw)
+                correct = _moves_match(predicted, expected_uci, board)
+            except Exception as exc:
+                predicted = f"[error: {exc}]"
+                correct = False
+
+            move_results.append(
+                {
+                    "expected": expected_san,
+                    "expected_uci": expected_uci,
+                    "predicted": predicted,
+                    "correct": correct,
+                }
+            )
+
+        movetext = _append_move_san(movetext, board, expected_move)
+        board.push(expected_move)
+
+        full_sequence.append(
+            {
+                "san": expected_san,
+                "uci": expected_uci,
+                "side": move_side,
+                "role": "prediction" if i % 2 == 1 else "response",
+                "fen_after": board.fen(),
+                "predicted": move_results[-1]["predicted"] if i % 2 == 1 else None,
+                "correct": move_results[-1]["correct"] if i % 2 == 1 else None,
+            }
+        )
+
+    total = len(move_results)
+    correct_count = sum(1 for r in move_results if r["correct"])
+    return {
+        "id": puzzle.get("ID", ""),
+        "rating": int(puzzle.get("Rating", 0)),
+        "themes": puzzle.get("Themes", []),
+        "fen": fen,
+        "total_predictions": total,
+        "correct_predictions": correct_count,
+        "depth": f"{correct_count}/{total}",
+        "moves": move_results,
+        "sequence": full_sequence,
+    }
+
+
+def _benchmark_summary(results: list[dict]) -> dict:
+    total_puzzles = len(results)
+    if total_puzzles == 0:
+        return {
+            "total_puzzles": 0,
+            "total_predictions": 0,
+            "correct_predictions": 0,
+            "accuracy": 0,
+            "fully_solved": 0,
+            "fully_solved_pct": 0,
+            "first_move_correct": 0,
+            "first_move_pct": 0,
+            "by_rating": {},
+            "by_theme": {},
+        }
+
+    total_predictions = sum(r["total_predictions"] for r in results)
+    correct_predictions = sum(r["correct_predictions"] for r in results)
+    fully_solved = sum(
+        1 for r in results if r["correct_predictions"] == r["total_predictions"]
+    )
+    first_move_correct = sum(
+        1
+        for r in results
+        if r["moves"] and r["moves"][0]["correct"]
+    )
+
+    by_rating: dict[int, dict] = {}
+    for r in results:
+        bracket = (r["rating"] // 200) * 200
+        bucket = by_rating.setdefault(
+            bracket,
+            {"count": 0, "correct": 0, "total_predictions": 0, "correct_predictions": 0},
+        )
+        bucket["count"] += 1
+        bucket["correct"] += 1 if r["correct_predictions"] == r["total_predictions"] else 0
+        bucket["total_predictions"] += r["total_predictions"]
+        bucket["correct_predictions"] += r["correct_predictions"]
+
+    by_rating_labeled = {
+        f"{k}-{k + 199}": v for k, v in sorted(by_rating.items())
+    }
+
+    by_theme: dict[str, dict] = {}
+    for r in results:
+        for theme in r.get("themes", []):
+            if not theme:
+                continue
+            bucket = by_theme.setdefault(
+                theme,
+                {"count": 0, "correct": 0, "total_predictions": 0, "correct_predictions": 0},
+            )
+            bucket["count"] += 1
+            bucket["correct"] += 1 if r["correct_predictions"] == r["total_predictions"] else 0
+            bucket["total_predictions"] += r["total_predictions"]
+            bucket["correct_predictions"] += r["correct_predictions"]
+
+    return {
+        "total_puzzles": total_puzzles,
+        "total_predictions": total_predictions,
+        "correct_predictions": correct_predictions,
+        "accuracy": round(correct_predictions / total_predictions * 100, 1) if total_predictions else 0,
+        "fully_solved": fully_solved,
+        "fully_solved_pct": round(fully_solved / total_puzzles * 100, 1),
+        "first_move_correct": first_move_correct,
+        "first_move_pct": round(first_move_correct / total_puzzles * 100, 1),
+        "by_rating": by_rating_labeled,
+        "by_theme": dict(sorted(by_theme.items())),
+    }
+
+
+_benchmark_cancel = threading.Event()
+
+
+# ---------------------------------------------------------------------------
+# WebSocket handler
+# ---------------------------------------------------------------------------
+
 async def echo(websocket):
+    global _benchmark_cancel
+    benchmark_task: Optional[asyncio.Task] = None
+
+    async def run_benchmark(puzzle_count: Optional[int]):
+        _benchmark_cancel.clear()
+        puzzles = load_puzzles()
+        if puzzle_count and puzzle_count > 0:
+            puzzles = puzzles[:puzzle_count]
+
+        model_name = engine.model_name or (
+            engine.ckpt_path.parent.name if engine.ckpt_path else "unknown"
+        )
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        results_file = benchmarks_dir() / f"{model_name}_{timestamp}.json"
+
+        progress = {
+            "model": model_name,
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "puzzle_count": len(puzzles),
+            "completed": 0,
+            "results": [],
+        }
+
+        for i, puzzle in enumerate(puzzles):
+            if _benchmark_cancel.is_set():
+                break
+
+            result = await asyncio.to_thread(process_puzzle, puzzle, engine)
+            progress["results"].append(result)
+            progress["completed"] = i + 1
+
+            if (i + 1) % 5 == 0 or (i + 1) == len(puzzles):
+                progress["finished_at"] = datetime.now().isoformat(timespec="seconds")
+                results_file.write_text(
+                    json.dumps(progress, indent=2), encoding="utf-8"
+                )
+
+            await websocket.send(
+                json.dumps(
+                    {
+                        "type": "benchmark_progress",
+                        "completed": i + 1,
+                        "total": len(puzzles),
+                        "latest_result": result,
+                        "summary": _benchmark_summary(progress["results"]),
+                        "current_fen": puzzle.get("Starting position", ""),
+                    }
+                )
+            )
+
+        progress["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        results_file.write_text(json.dumps(progress, indent=2), encoding="utf-8")
+
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "benchmark_complete",
+                    "completed": progress["completed"],
+                    "total": len(puzzles),
+                    "summary": _benchmark_summary(progress["results"]),
+                    "results_file": str(results_file),
+                    "cancelled": _benchmark_cancel.is_set(),
+                }
+            )
+        )
+
     async for message in websocket:
         try:
             payload = json.loads(message)
@@ -587,6 +949,19 @@ async def echo(websocket):
                             "current_is_sft": selected.get("current_is_sft", False),
                         }
                     )
+                elif action == "start_benchmark":
+                    if benchmark_task and not benchmark_task.done():
+                        raise ValueError("Benchmark already running")
+                    puzzle_count = payload.get("puzzle_count")
+                    pc = int(puzzle_count) if puzzle_count is not None else None
+                    engine._ensure_loaded()
+                    benchmark_task = asyncio.create_task(run_benchmark(pc))
+                    response = json.dumps(
+                        {"type": "benchmark_started", "puzzle_count": pc}
+                    )
+                elif action == "stop_benchmark":
+                    _benchmark_cancel.set()
+                    response = json.dumps({"type": "benchmark_stopping"})
                 else:
                     raise ValueError(f"Unsupported action: {action}")
             else:

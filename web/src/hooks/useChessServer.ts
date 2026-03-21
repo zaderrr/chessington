@@ -72,6 +72,16 @@ export function useChessServer(onMessage: MessageHandler) {
             return;
         }
 
+        if (
+            payload.type === "benchmark_started" ||
+            payload.type === "benchmark_progress" ||
+            payload.type === "benchmark_complete" ||
+            payload.type === "benchmark_stopping"
+        ) {
+            onMessage(payload);
+            return;
+        }
+
         onMessage(payload);
     };
 
@@ -119,6 +129,17 @@ export function useChessServer(onMessage: MessageHandler) {
         send({ action: "set_model", model_name: name });
     };
 
+    const startBenchmark = (puzzleCount?: number) => {
+        send({
+            action: "start_benchmark",
+            puzzle_count: puzzleCount ?? null,
+        });
+    };
+
+    const stopBenchmark = () => {
+        send({ action: "stop_benchmark" });
+    };
+
     useEffect(() => {
         return () => socketRef.current?.close();
     }, []);
@@ -135,5 +156,7 @@ export function useChessServer(onMessage: MessageHandler) {
         saveGame,
         refreshModels,
         selectModel,
+        startBenchmark,
+        stopBenchmark,
     };
 }

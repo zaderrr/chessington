@@ -20,7 +20,6 @@ const MovePanel = ({
     onResetSessionMatches,
     availableModels,
     selectedModel,
-    onRefreshModels,
     onSelectModel,
     onExportPgn,
 }: {
@@ -39,7 +38,6 @@ const MovePanel = ({
     onResetSessionMatches: () => void;
     availableModels: ModelOption[];
     selectedModel: string;
-    onRefreshModels: () => void;
     onSelectModel: (name: string) => void;
     onExportPgn: () => void;
 }) => {
@@ -66,31 +64,22 @@ const MovePanel = ({
                             </button>
                         </div>
 
-                        <div className="flex gap-2 items-end">
-                            <label className="flex-1 text-xs text-stone-400 flex flex-col gap-1">
-                                Model
-                                <select
-                                    className="px-2 py-1.5 rounded-md bg-stone-800 border border-stone-700 text-stone-200 text-sm focus:outline-none focus:border-stone-500 transition-colors"
-                                    onChange={(e) => onSelectModel(e.target.value)}
-                                    value={selectedModel}
-                                >
-                                    <option value="">Select model</option>
-                                    {availableModels.map((m) => (
-                                        <option key={m.name} value={m.name}>
-                                            {m.name}
-                                            {m.is_sft ? " (SFT)" : ""}
-                                        </option>
-                                    ))}
-                                </select>
-                            </label>
-                            <button
-                                className="px-3 py-1.5 text-xs rounded-md bg-stone-800 border border-stone-700 hover:bg-stone-700 text-stone-300 transition-colors"
-                                onClick={onRefreshModels}
-                                type="button"
+                        <label className="text-xs text-stone-400 flex flex-col gap-1">
+                            Model
+                            <select
+                                className="px-2 py-1.5 rounded-md bg-stone-800 border border-stone-700 text-stone-200 text-sm focus:outline-none focus:border-stone-500 transition-colors"
+                                onChange={(e) => onSelectModel(e.target.value)}
+                                value={selectedModel}
                             >
-                                Refresh
-                            </button>
-                        </div>
+                                <option value="">Select model</option>
+                                {availableModels.map((m) => (
+                                    <option key={m.name} value={m.name}>
+                                        {m.name}
+                                        {m.is_sft ? " (SFT)" : ""}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
 
                         <div className="pt-1">
                             <div className="text-xs text-stone-500 mb-2">Stockfish settings (watch mode)</div>
